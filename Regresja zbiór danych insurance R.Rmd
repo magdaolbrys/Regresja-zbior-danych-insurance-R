@@ -1,0 +1,316 @@
+---
+title: "Wnioskowanie Statystyczne II - Projekt"
+author: "Magdalena Olbryś i Franciszek Grzonka"
+output: pdf_document
+---
+
+Pakiety których używamy:
+```{r, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(factoextra)
+library(forecast)
+```
+
+Link do danych : 
+https://www.kaggle.com/mirichoi0218/insurance
+
+
+### Dane i opis projektu
+
+Zaczynamy od wczytania danych:
+```{r, message=FALSE}
+data <- read.csv('insurance.csv')
+```
+Dane zawierają informacje o 1338 osobach które wykupiły ubezpieczenie. Podzielimy je na zbiór uczący i testowy, postaramy się zbudować modele predykcyjne, a następnie na ich podstawie przewidzieć koszty leczenia(charges). Spróbujemy też ocenić który z nich jest najlepszy.
+
+Dokładniej, wybierzemy najlepszy model wykorzystujący analizę wariancji, najlepszy model wykorzystujący regresje prostą i wieloraką oraz najlepszy model wykorzystujący analize kowariancji, a następnie je do siebie porównamy aby jak najlepiej przewidzieć ceny ubezpieczeń dla zbioru testowego.
+
+Do wyboru modelu będziemy używać kryterium informacyjnego AIC, które estymuje informację traconą w skutek używania naszego modelu, a zatem będziemy wybierać model o jak najmniejszej wartości AIC. 
+
+
+**Zmiennne**
+
+zmienna     opis
+--------    ----
+`age`       wiek ubezpieczonego
+`sex`       płeć ubezpieczonego
+`bmi`       wskaźnik masy ciała ubezpieczonego
+`children`  liczba dzieci objętych ubezpieczeniem
+`smoker`    indykator tego, czy ubezpieczony jest palaczem
+`region`    region w USA w którym mieszka ubezpieczony 
+`charges`   indywidualne koszty leczenia rozliczane przez ubezpieczenie zdrowotne
+
+\newpage
+
+Zobaczmy jak wygląda struktura danych:
+```{r}
+str(data)
+```
+Zmienne sex, children, smoker i region są kategoryczne a więc zmieńmy je na typ factor.
+
+```{r}
+data <- data %>% mutate(sex = factor(sex), 
+                        children = factor(children),
+                        smoker = factor(smoker),
+                        region = factor(region))
+str(data)
+```
+Przyjrzyjmy się dokładniej naszym danym.
+```{r}
+summary(data)
+```
+W naszych danych mężczyzn i kobiet jest mniej więcej równa ilość, rozkład zamieszkania również jest dość równomierny prócz południowego wschodu gdzie przebywa trochę więcej osób, stosunek palaczy do osób niepalących wynosi mniej więcej 1 do 4.
+```{r}
+summary(data$age)
+hist(data$age, 35, xlab = "Wiek", ylab = "Częstotliowść",  main = paste("Histogram wieku"))
+```
+Widzimy, że wiek ubezpieczonych nie wykracza poza przedział 18-64 oraz pórcz dużej grupy osiemnastolatków ilość przedstaiwcieli każdej grupy wiekowej jest podobna.
+\newpage
+
+```{r}
+summary(data$bmi)
+hist(data$bmi, 20, xlab = "BMI", ylab = "Częstotliowść",  main = paste("Histogram BMI"))
+```
+Wskaźnik BMI za to ma rozkład normalny, w kilkudziesięciu przypadkach jest większy od 40 co oznacza otyłość III stopnia oraz w kilkunastu przypadkach mamy do czynienia z niedowagą. 
+
+
+Jak widać w naszych danych nie występują wartości nierealistyczne, więc nie musimy czyścić danych ani zamieniać błędnych wartości.
+
+
+Teraz podzielmy nasze dane na 2 zbiory: uczący i testowy.
+```{r}
+smp_size <- floor(0.66 * nrow(data)) 
+set.seed(123)
+train_ind <- sample(seq_len(nrow(data)), size = smp_size)
+train <- data[train_ind, ]
+test <- data[-train_ind, ]
+```
+Dalsze modele będziemy opierać na danych treningowych a predykcje tworzyć na danych testowych.
+
+\newpage
+
+## Klasyczna regresja
+
+Porównajmy modele liniowe stworzone w oparciu o współczynniki które nie są kategorczyne(age i bmi).
+
+
+```{r, fig.height=5, fig.width=12}
+model.age <-lm(formula = charges ~ age, data = train)
+summary(model.age)
+plot(model.age)
+```
+Niska wartość prawdopodobieństwa testowego pozwala nam stwierdzić, iż na podstawie wpółczynnika determinacji wiek wpływa na koszty zdrowotne tylko w około 6%. 
+\newpage
+
+Zobaczmy jak to wygląda dla modelu opartego na BMI.
+```{r, fig.height=5, fig.width=12}
+model.bmi <-lm(formula = charges ~ bmi, data = train)
+summary(model.bmi)
+plot(model.bmi)
+```
+Widzimy, że wskaźnik masy ciała(bmi) wpływa na koszty leczenia tylko w 3,8%.
+\newpage
+Stwórzmy model oparty na obu tych czynnikach.
+```{r, fig.height=5, fig.width=12}
+model.age_bmi <- lm(formula = charges ~ age + bmi, data = train)
+summary(model.age_bmi)
+plot(model.age_bmi)
+```
+Możemy zauważyć że model zawierający zmienną wieku jaki bmi jest zdecydowanie lepszy od poprzedników opierających się na pojednynczych zmiennych. R kwadrat wynosi 9,2% co jak do tej pory jest najlepszym wynikiem.
+
+Sprawdźmy to jeszcze porównując kryteria AIC.
+```{r}
+extractAIC(model.age)
+extractAIC(model.bmi)
+extractAIC(model.age_bmi)
+```
+Kryterium to potwierdza, ponieważ wynik dla modelu opartego o dwie zmienne wyszedł najniższy(16553.66).
+
+
+\newpage
+
+## Analiza wariancji
+
+W analizie wariancji bedziemy zajmowąć się modelami zależnymi od czynników typu factor. Najpierw znajdziemy najbardziej znaczącą zmienną i zbudujemy model, który uwzględnia tylko ją. Następnie będziemy dołączać kolejne cechy i zobaczymy który model jest najlepszy.
+
+Sprawdzimy to przyglądając się wykresom pudełkowym, obrazującym zależność wartości zmiennych typu factor a kosztem leczenia.
+
+```{r, fig.height=4, fig.width=10, echo = FALSE}
+
+ggplot(data = data ,aes(smoker, charges)) + geom_boxplot(fill = c(2:3)) +
+  theme_classic() + ggtitle("Wykres pudełkowy: koszty leczenia wobec palenia")
+
+ggplot(data = data ,aes(sex, charges)) + geom_boxplot(fill = c(4:5)) +
+  theme_classic() + ggtitle("Wykres pudełkowy: koszty leczenia wobec płci")
+
+ggplot(data = data, aes(region,charges)) + geom_boxplot(fill = c(2:5)) +
+  theme_classic() + ggtitle("Wykres pudełkowy: koszty leczenia wobec reginu zamieszkania")
+
+ggplot(data = data ,aes(children,charges)) + geom_boxplot(fill = c(2:7)) +
+  theme_classic() +  ggtitle("Wykres pudełkowy: koszty leczenia względem ilości dzieci")
+
+```
+
+Widzimy, że najistotniejszym czynnikiem jest zmienna smoker. U palaczy, koszty ubezpieczenia są zwykle większe. Miejsce zamieszkania i płeć wydają się nie mieć wpływu na wysokość opłat za ubezpieczenie. Natomiast ilość dzieci osoby ubezpieczającej się, może być istotna.
+
+
+Model z jednym czynnikiem: zmienną smoker.
+
+```{r}
+one.way <- aov(charges ~ smoker, data = train)
+summary(one.way)
+```
+Im większa wartość F, tym większe prawdopodobieństwo, że zmienność spowodowana przez zmienną niezależną smoker nie jest przypadkowa.
+W tym przypadku jest całlkiem duża, to dobrze.
+Wartość p zmiennej smoker jest niska (p <0,001), więc wydaje się, że palenie ma wpływ na cenę ubezpieczenia.
+
+
+Największy wpływ na opłaty za ubezpieczenie (oprócz zmiennej smoker) ma jednak zmienna children, sprawdźmy więc model uwzględniający ilość dzieci i indykator palenia.
+
+
+```{r}
+summary(aov(charges ~ smoker + children, data = train))
+two.way <- aov(charges ~ smoker + children, data = train)
+
+```
+Model wydaje sie być prawie tak samo dobry, jak ten z samą zmienną smoker.
+
+Zbudujmy też model zależny od wszystkich zmiennych aby móc go później porównać z pozostałymi modelami, ale prawdopodobnie nie będzie on lepszy od poprzedniego.
+
+```{r}
+summary(aov(charges ~ smoker + children + sex + region, data = train))
+all.way <- aov(charges ~ smoker + children + sex + region, data = train)
+
+```
+
+
+
+Możemy też sprawdzić model, w którym liczba dzieci jest zależna od tego czy osoba ubezpieczająca się jest palaczem.
+```{r}
+summary(aov(charges ~ smoker * children, data = train))
+interaction <- aov(charges ~ smoker * children, data = train)
+
+```
+
+
+
+Wybór modelu:
+Sprawdzamy AIC dla wszystkich modeli:
+```{r}
+extractAIC(one.way)[2]
+extractAIC(two.way)[2]
+extractAIC(all.way)[2]
+extractAIC(interaction)[2]
+
+```
+Model z jedną zmienną smoker jest najlepiej dopasowany. Ma on najniższą wartość AIC. To wydaję się być bardzo sensowne, biorąc pod uwage wykresy pudełkowe, wartości p, F i inne wartości modeli.
+
+
+
+## Analiza kowariancji
+
+Będziemy wyjaśniać zmienną charges za pomocą zmiennych zarówno numerycznych jak i kategorycznych.
+
+Wiemy już, że zmienne kategoryczne które warto wziąć pod uwagę to tylko zmienna smoker.
+
+Na początku sprawdźmy model biorący pod uwagę wszytskie predyktory.   
+```{r}
+model.lm.all <- lm(formula = charges ~ ., data = train)
+summary(model.lm.all)
+```
+Widzimy że wartość p jest mała (<0.05) a więc możemy odrzucić hipoteze zerową tym samym przyjmując że może istnieć potencjalny związek między predyktorami a wynikiem. Niestety błąd standardowy jest bardzo duży (6249) przez odchylenie naszego modelu od lini regresji jest bardzo duże. Możemy to także zauważyć na poniższych wykresach.
+
+```{r, echo = FALSE, fig.height=5, fig.width=12}
+plot(model.lm.all)
+```
+
+Zbudujmy teraz model zależny od następujących zmiennych:
+smoker - ponieważ budując modele ANOVA wyszło nam, że jest to jedyna cecha wpływająca znacząco na ostateczne opłaty za ubezpieczenie.
+bmi oraz age - ponieważ w modelach prostej i wielorakiej regresji wyszło, że są one istotne.
+
+```{r}
+model.lm.sig <- lm(charges ~ age + bmi + smoker, data = train)
+```
+
+
+
+
+## Wybór najlepszego modelu:
+
+Podsumowując, ustaliliśmy, że biorąc pod uwagę zmienne kategoryczne, najlepszy  model, to model one.way który wykorzystuje tylko zmienną smoker. W przypadku budowania modelu regresji, najlepszy był ten który uwzględniał zmienne age oraz bmi - model.age_bmi.
+Dzięki tym informacjom powstał model model.lm.sig, w którym opłaty za ubezpieczenie zalezże są od wieku, bmi oraz faktu, czy osoba ubezpieczjąca się pali.
+
+Sprawdźmy jeszcze za pomocą AIC, czy ten model jest faktycznie najlepszy:
+```{r}
+extractAIC(one.way)[2]
+extractAIC(model.age_bmi)[2]
+extractAIC(model.lm.sig)[2]
+```
+
+Ma najmniejsze AIC, więc prawdopodobnie będzie najlepszy do wykonania predykcji.
+Zobaczmy jego wykresy diagnostyczne:
+
+```{r, fig.height=5, fig.width=12}
+plot(model.lm.sig)
+```
+
+Widać, że wykresy diagnostyczne znacznie odbiegają od ideału. Próbowaliśmy więc różnych przekształceń danych, logarytmowaliśmy je oraz podnosiliśmy do potęgi, natomiast nic z tych rzeczy nie przyniosło oczekiwanego rezultatu, nawet jeśli model się poprawiał, to nieznacznie.
+
+
+
+
+Sprawdźmy więc jak dla tego modelu będzie wyglądała predykcja.
+
+
+## Predykcja:
+
+Z danych które będziemy testować usuwamy kolumne charges:
+```{r}
+new.test <- test %>% select(-charges)
+```
+
+ 
+
+```{r}
+prediction <- predict(model.lm.sig, newdata = new.test)
+```
+
+ 
+
+Kilka pierwszych wyników predykcji:
+```{r}
+head(prediction)
+```
+
+ 
+
+Dla porównania, prawdziwe dane:
+```{r}
+head(test$charges)
+```
+
+ 
+
+Na pierwszy rzut oka widać, że nie są one nawet za bardzo podobne.
+
+ 
+
+Spróbujmy to jeszcze zwizualizować na wykresie:
+Na osi x umieścimy przewidywaną wartość, a na osi y realną. W idealnym modelu wszytskie wartości leżałyby na prostej x=y.
+ 
+
+```{r, echo=FALSE}
+dane_do_wykresu <- cbind(test, prediction)
+dane_do_wykresu %>%
+ggplot(aes(prediction, charges)) +
+geom_point() +
+geom_line(aes(y=prediction), size = 2, color = "red") +
+labs(x="Predicted Value", y="Charges")
+```
+
+
+
+## Wniosek:
+Mimo sprawdzania wielu modeli, nasz model regresji a w związku z tym i predykcja nie są idealne. 
+Próbowaliśmy też wielu innych modeli (przekształcenia zmiennych np logarytmem) ale nie przynosiło to oczekiwanych rezultatów, dane poprawiały się nieznacznie albo wcale.
